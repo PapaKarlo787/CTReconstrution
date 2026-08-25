@@ -1,0 +1,22 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "x64\\Debug\\stl.h.obj",
+            "outputs": [
+                "C:\\Users\\Admin\\source\\repos\\3D2R\\3D2R\\x64\\Debug\\vc145.pdb",
+                "x64\\Debug\\",
+                "C:\\Users\\Admin\\source\\repos\\3D2R\\3D2R\\x64\\Debug\\stl.h.ifc"
+            ],
+            "provides": [
+                {
+                    "logical-name": "stl.h",
+                    "source-path": "c:\\users\\admin\\source\\repos\\3d2r\\3d2r\\stl.h",
+                    "lookup-method": "absolute"
+                }
+            ],
+            "requires": []
+        }
+    ]
+}

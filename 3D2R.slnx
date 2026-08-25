@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="3D2R/3D2R.vcxproj" Id="5a20168c-9bb0-49f8-b21a-9505a6cf5d93" />
+</Solution>

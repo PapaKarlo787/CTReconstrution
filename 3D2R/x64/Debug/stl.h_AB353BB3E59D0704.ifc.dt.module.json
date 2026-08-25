@@ -1,0 +1,22 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "x64\\Debug\\stl.obj",
+            "outputs": [
+                "x64\\Debug\\stl.h_AB353BB3E59D0704.ifc.dt.module.json",
+                "x64\\Debug\\stl.h_AB353BB3E59D0704.ifc.dt.d.json",
+                "x64\\Debug\\stl.h.ifc"
+            ],
+            "provides": [
+                {
+                    "logical-name": "C:\\Users\\Admin\\source\\repos\\3D2R\\3D2R\\stl.h",
+                    "source-path": "c:\\users\\admin\\source\\repos\\3d2r\\3d2r\\stl.h",
+                    "lookup-method": "absolute"
+                }
+            ],
+            "requires": []
+        }
+    ]
+}
