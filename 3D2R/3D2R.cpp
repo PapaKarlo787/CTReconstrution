@@ -136,22 +136,22 @@ int main(int argc, char** argv)
 
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "-o") {
-			outputPos = i;
+			outputPos = i - 1;
 			break;
 		}
 	}
 
-	const int oargc = outputPos >= 0 ? argc - outputPos - 1 : 0;
+	const int oargc = outputPos > 0 ? argc - outputPos : 0;
 
-	if (outputPos < 2 || (oargc != 1 && oargc != 3)) {
+	if (outputPos < 1 || (oargc != 1 && oargc != 3)) {
 		std::cerr << "usage:\n" << "  " << argv[0] << " in1.stl [in2.stl ...] -o out.tiff [snapshots axis]\n";
 		return -1;
 	}
 
 	std::vector<STL> models;
-	models.reserve(outputPos - 1);
+	models.reserve(outputPos);
 	argv++;
-	for (int i = 1; i < outputPos; ++i) {
+	for (int i = 0; i < outputPos; ++i) {
 		models.emplace_back(STL(argv[0]));
 		models.back().scaleToSize(5);
 		argv++;
