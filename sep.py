@@ -135,6 +135,82 @@ def clean_16bit_image(img):
 
 	return img_first_pass, mask
 
+import matplotlib.pyplot as plt
+
+
+def pair_log_points(image_a, image_b, pair_mask):
+    image_a = np.asarray(image_a, dtype=np.float64)
+    image_b = np.asarray(image_b, dtype=np.float64)
+    background_a = np.max(image_a) + 1e-9
+    background_b = np.max(image_b) + 1e-9
+    binary_mask = np.where(pair_mask > 0, 255, 0).astype(np.uint8)
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contour_data = []
+    
+    for contour in contours:
+        contour_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
+        cv2.drawContours(contour_mask, [contour], -1, 255, thickness=cv2.FILLED)
+        
+        valid = (contour_mask > 0) & (image_a > 0) & (image_b > 0)
+        valid_flat = valid.flatten()
+        if not np.any(valid_flat):
+            continue
+            
+        v_img_a = image_a.flatten()[valid_flat]
+        v_img_b = image_b.flatten()[valid_flat]
+        x = np.log(np.clip(v_img_a / background_a, 1e-9, None))
+        y = np.log(np.clip(v_img_b / background_b, 1e-9, None))
+        contour_data.append((x, y, cv2.contourArea(contour)))
+        
+    return contour_data
+    
+def draw_paired_contours(data_source_1, data_source_2, area_threshold=0.6):
+    """
+    Сопоставляет контуры по площади и рисует пары на одном окне.
+    area_threshold: максимальное допустимое относительное различие площадей (от 0 до 1).
+                    0.6 означает, что площади не должны отличаться более чем на 60%.
+    """
+    data_1_sorted = sorted(data_source_1, key=lambda k: k[2], reverse=True)
+    data_2_sorted = sorted(data_source_2, key=lambda k: k[2], reverse=True)
+    
+    paired_count = 0
+    used_indices_2 = set()
+    
+    for i, c1 in enumerate(data_1_sorted):
+        area1 = c1[2]
+        
+        best_match_idx = None
+        best_area_diff = float('inf')
+        
+        for j, c2 in enumerate(data_2_sorted):
+            if j in used_indices_2:
+                continue
+                
+            area2 = c2[2]
+            relative_diff = abs(area1 - area2) / max(area1, area2, 1e-9)
+            
+            if relative_diff < area_threshold and relative_diff < best_area_diff:
+                best_area_diff = relative_diff
+                best_match_idx = j
+                
+        if best_match_idx is not None:
+            used_indices_2.add(best_match_idx)
+            c2 = data_2_sorted[best_match_idx]
+            paired_count += 1
+            
+            x1, y1 = c1[:2]
+            x2, y2 = c2[:2]
+            
+            plt.figure(figsize=(7, 5))
+            plt.scatter(x1, y1, s=4, color='royalblue', alpha=0.7, label=f"Источник 1 (S={area1:.1f})")
+            plt.scatter(x2, y2, s=4, color='crimson', alpha=0.7, label=f"Источник 2 (S={c2[2]:.1f})")
+            
+            plt.title(f"Сопоставленная пара контуров №{paired_count} (Разница площадей: {best_area_diff*100:.1f}%)")
+            plt.xlabel("ln(I первого снимка / I0)")
+            plt.ylabel("ln(I второго снимка / I0)")
+            plt.grid(True, linestyle="--", alpha=0.5)
+            plt.legend()
+        plt.show()
 
 def process_snapshot(path):
 	image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -148,7 +224,7 @@ def process_snapshot(path):
 	mask_1_3 = (np.logical_and(masks[0] != 0, masks[2] != 0) * 255).astype(np.uint8)
 	mask_2_4 = (np.logical_and(masks[1] != 0, masks[3] != 0) * 255).astype(np.uint8)
 
-	results = [[results[i][0], mask_2_4 if i&1 else mask_1_3] for i in range(len(results))]
+	results = [[results[i][0], mask_2_4 if i & 1 else mask_1_3] for i in range(len(results))]
 	
 	for i, res in enumerate(results):
 		res[0] = isolate_objects_and_darken_all(res[0], res[1], 0.9, 0.85)
@@ -158,7 +234,10 @@ def process_snapshot(path):
 		cv2.imshow('Result', np.uint8(res[0] / 256))
 		cv2.waitKey(0)
 		cv2.destroyAllWindows()
-		
+	contours_a = pair_log_points(results[0][0], results[2][0], results[0][1])
+	contours_b = pair_log_points(results[1][0], results[3][0], results[1][1])
+	draw_paired_contours(contours_a, contours_b, area_threshold=0.5)
+	
 
 process_snapshot("2.tif")
 
