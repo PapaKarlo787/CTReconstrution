@@ -16,208 +16,50 @@ STRIPE_FRACTION = 0.90
 
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, median_filter, maximum_filter1d
+from scipy.ndimage import gaussian_filter1d, maximum_filter1d, median_filter
 
 
-def correct_smooth_row_drift(
-    image,
-    neighbor_rows=2,
-    edge_threshold=None,
-    window=25,
-    step=8,
-    max_white_width=20,
-):
-    source = np.asarray(image, dtype=np.float64)
-    if source.ndim != 2:
-        raise ValueError("ожидается двумерное изображение")
+def correct_smooth_row_drift(image, neighbor_rows=2, smooth_sigma=25, edge_threshold=None):
+	source = np.asarray(image, dtype=np.float64)
+	if source.ndim != 2:
+		raise ValueError("ожидается двумерное изображение")
 
-    height, width = source.shape
-    if width < 12:
-        return source.copy()
+	height, width = source.shape
+	if width < 8:
+		return source.copy()
+	detection = gaussian_filter1d(source, sigma=1.0, axis=1)
+	curvature = np.abs(np.diff(detection, n=2, axis=1))
 
-    # Фильтрация нужна только для поиска границ.
-    # Значения пикселей объекта из source не сглаживаются.
-    detection = median_filter(source, size=(1, 3))
-    derivative = np.diff(detection, axis=1)
-    sharpness = derivative - gaussian_filter1d(
-        derivative, sigma=8, axis=1
-    )
+	if edge_threshold is None:
+		median = np.median(curvature)
+		noise = 1.4826 * np.median(np.abs(curvature - median))
+		threshold = median + 6.0 * noise
+	else:
+		threshold = edge_threshold
 
-    if edge_threshold is None:
-        center = np.median(sharpness)
-        noise = 1.4826 * np.median(np.abs(sharpness - center))
-        edge_threshold = max(5.0, 6.0 * noise)
+	local_edges = np.zeros_like(source, dtype=bool)
+	local_edges[:, 1:-1] = curvature > threshold
 
-    magnitude = np.abs(sharpness)
-    peaks = (
-        (magnitude >= edge_threshold)
-        & (magnitude >= maximum_filter1d(magnitude, size=3, axis=1))
-    )
+	protected = maximum_filter1d(local_edges.astype(np.uint8), size=2 * neighbor_rows + 1, axis=0).astype(bool)
+	protected = maximum_filter1d(protected.astype(np.uint8), size=7, axis=1).astype(bool)
+	protected = protected[:, 1:] | protected[:, :-1]
 
-    # Для сравнения уровней нужны пиксели с обеих сторон границы.
-    peaks[:, :4] = False
-    peaks[:, -4:] = False
+	original_derivative = np.diff(source, axis=1)
+	usable = (~protected).astype(np.float64)
 
-    def jump_at(row, x):
-        """Перепад через границу между x и x+1."""
-        left = np.median(detection[row, x-3:x+1])
-        right = np.median(detection[row, x+1:x+5])
-        return float(right - left)
+	numerator = gaussian_filter1d(original_derivative * usable, sigma=smooth_sigma, axis=1)
+	denominator = gaussian_filter1d(usable, sigma=smooth_sigma, axis=1)
 
-    # Области, которые нельзя использовать для оценки фона.
-    dark_mask = np.zeros((height, width), dtype=bool)
-    white_mask = np.zeros((height, width), dtype=bool)
+	smooth_derivative = np.divide(numerator, denominator, out=np.zeros_like(original_derivative), where=denominator > 0.05)
+	smooth_derivative[protected] = 0.0
 
-    for y in range(height):
-        y0 = max(0, y - neighbor_rows)
-        y1 = min(height, y + neighbor_rows + 1)
+	drift = np.zeros_like(source)
+	drift[:, 1:] = np.cumsum(smooth_derivative, axis=1)
+	drift -= np.median(drift, axis=1)[:, None]
 
-        # Кандидаты из текущей и соседних строк.
-        candidates = []
-        for yy in range(y0, y1):
-            for x in np.flatnonzero(peaks[yy]):
-                candidates.append((int(x), yy))
-        candidates.sort()
+	return source - drift
 
-        # Одну границу, найденную рядом в нескольких строках,
-        # считаем одним событием.
-        groups = []
-        for item in candidates:
-            if not groups or item[0] - groups[-1][-1][0] > 1:
-                groups.append([item])
-            else:
-                groups[-1].append(item)
 
-        edges = []
-        for group in groups:
-            own = [x for x, yy in group if yy == y]
-            x = (
-                max(own, key=lambda xx: magnitude[y, xx])
-                if own else
-                int(round(np.mean([xx for xx, _ in group])))
-            )
-
-            neighbor_jumps = np.array(
-                [jump_at(yy, xx) for xx, yy in group],
-                dtype=np.float64,
-            )
-
-            # Знак определяем по обнаруженным соседним границам.
-            sign = np.sign(np.median(neighbor_jumps))
-            supported = neighbor_jumps[
-                np.sign(neighbor_jumps) == sign
-            ]
-            if sign == 0 or supported.size == 0:
-                continue
-
-            mean_jump = float(np.mean(supported))
-            own_jump = jump_at(y, x)
-
-            # Сильная граница в текущей строке — её собственная.
-            # Если здесь она слаба, используем среднюю по соседям
-            # для определения типа границы, НЕ для замены пикселей.
-            if own and abs(own_jump) >= edge_threshold:
-                jump = own_jump
-            else:
-                jump = mean_jump
-
-            if np.sign(jump) == sign:
-                edges.append((x + 1, jump))
-
-        edges.sort()
-
-        # Сопоставляем пары границ.
-        pending = None
-        for position, jump in edges:
-            if pending is None:
-                pending = (position, jump)
-                continue
-
-            start, first_jump = pending
-
-            if np.sign(first_jump) == np.sign(jump):
-                # Несколько границ одного направления:
-                # ждём противоположную; берём последнюю.
-                pending = (position, jump)
-                continue
-
-            if first_jump < 0 and jump > 0:
-                # Вниз -> вверх: тёмный объект.
-                dark_mask[y, start:position] = True
-
-            elif first_jump > 0 and jump < 0:
-                # Вверх -> вниз: короткий белый всплеск.
-                # Длинную светлую область автоматически не стираем.
-                if position - start <= max_white_width:
-                    white_mask[y, start:position] = True
-
-            pending = None
-
-        # Если объект начался, но до края строки не закончился,
-        # не используем этот хвост для оценки фона.
-        if pending is not None and pending[1] < 0:
-            dark_mask[y, pending[0]:] = True
-
-    excluded = dark_mask | white_mask
-    # Не берём в опорные точки сами края объектов и всплесков.
-    excluded = maximum_filter1d(
-        excluded.astype(np.uint8), size=7, axis=1
-    ).astype(bool)
-
-    # Общая медиана видимого фона — целевая ровная яркость.
-    visible = source[~excluded]
-    if visible.size == 0:
-        return source.copy()
-    target = float(np.median(visible))
-
-    result = source.copy()
-    half = window // 2
-
-    for y in range(height):
-        valid = ~excluded[y]
-        if np.count_nonzero(valid) < max(8, window // 2):
-            # Недостаточно открытого фона: не угадываем его под объектом.
-            continue
-
-        # Опорные точки плавного фона по всей строке.
-        anchor_x = []
-        anchor_value = []
-
-        centers = list(range(0, width, step))
-        if centers[-1] != width - 1:
-            centers.append(width - 1)
-
-        for center in centers:
-            left = max(0, center - half)
-            right = min(width, center + half + 1)
-            xs = np.flatnonzero(valid[left:right]) + left
-
-            if xs.size < max(4, (right - left) // 4):
-                continue
-
-            anchor_x.append(float(np.median(xs)))
-            anchor_value.append(float(np.median(source[y, xs])))
-
-        if not anchor_x:
-            continue
-
-        # Линейная интерполяция не даёт колебаний у резких границ.
-        # Под объектом фон продолжается между соседними опорами.
-        background = np.interp(
-            np.arange(width), anchor_x, anchor_value
-        )
-
-        # Сохраняем исходные детали объекта:
-        # убираем только оценённый плавный дрейф фона.
-        result[y] = source[y] - (background - target)
-
-        # Только распознанный короткий белый всплеск убираем целиком.
-        # Выход из тёмного объекта (вниз -> вверх) сюда не попадает.
-        result[y, white_mask[y]] = target
-
-    return result
-    
-    
 def factorize(fragment):
 	matrix = fragment.astype(np.float64)
 	height, width = matrix.shape
@@ -248,32 +90,67 @@ def factorize(fragment):
 			/ (np.sum(weights * vertical[:, None] ** 2, axis=0) + 1e-12),
 		)
 
-	min_scale = vertical.max() / 255
-	max_scale = 255 / horizontal.max()
+	scale = np.median(horizontal[horizontal > 0])
+	if scale > 0:
+		vertical *= scale
+		horizontal /= scale
 
-	scales = (
-		np.linspace(min_scale, max_scale, 121)
-		if min_scale <= max_scale
-		else [np.sqrt(min_scale * max_scale)]
+	return vertical, horizontal
+
+
+def clear(source):
+	black = source <= BLACK_LEVEL
+	black_rows = black.mean(axis=1) >= STRIPE_FRACTION
+
+	good_rows = np.flatnonzero(~black_rows)
+	if good_rows.size >= 2:
+		for y in np.flatnonzero(black_rows):
+			above = good_rows[good_rows < y]
+			below = good_rows[good_rows > y]
+			if above.size and below.size:
+				y0, y1 = above[-1], below[0]
+				t = (y - y0) / (y1 - y0)
+				source[y] = (1 - t) * source[y0] + t * source[y1]
+
+	vertical, reference_horizontal = factorize(
+		source[:, -REFERENCE_WIDTH:]
 	)
 
-	rows = np.linspace(0, height - 1, min(height, 300), dtype=int)
-	sample = matrix[rows]
-	best_score = float("inf")
-	best_factors = None
+	valid_rows = (
+		(vertical > 0)
+		& (vertical >= 0.15 * vertical.max())
+	)
+	if not np.any(valid_rows):
+		raise ValueError(f"фрагмент {k + 1}: нет пригодных строк")
 
-	for scale in scales:
-		v = np.clip(np.rint(vertical / scale), 0, 255)
-		h = np.clip(np.rint(horizontal * scale), 0, 255)
-		error = np.abs(sample - v[rows, None] * h[None, :])
-		score = np.mean(np.minimum(error, 10) ** 2)
+	ratios = source[valid_rows, :] / vertical[valid_rows, None]
 
-		if score < best_score:
-			best_score = score
-			best_factors = v, h
+	horizontal = np.quantile(ratios, 0.90, axis=0)
+	horizontal[-REFERENCE_WIDTH:] = reference_horizontal
+	horizontal = np.maximum(np.rint(horizontal), 0)
 
-	return best_factors
+	brightness = np.median(
+		source[valid_rows, -REFERENCE_WIDTH:]
+	)
 
+	product = vertical[:, None] * horizontal[None, :]
+	corrected = source.copy()
+	np.divide(
+		source * brightness,
+		product,
+		out=corrected,
+		where=product > 0,
+	)
+
+
+	for _ in range(0):
+		corrected = correct_smooth_row_drift(
+			corrected,
+			neighbor_rows=2,
+			smooth_sigma=25,
+		)
+		
+	return corrected
 
 def process(path):
 	with Image.open(path) as image:
@@ -297,55 +174,14 @@ def process(path):
 
 	for k in range(FRAGMENT_COUNT):
 		x0 = k * fragment_width
-		source = original[:, x0:x0 + fragment_width].astype(np.float64)
-
-		vertical, reference_horizontal = factorize(
-			source[:, -REFERENCE_WIDTH:]
-		)
-
-		valid_rows = (
-			(vertical > 0)
-			& (vertical >= 0.15 * vertical.max())
-		)
-		if not np.any(valid_rows):
-			raise ValueError(f"фрагмент {k + 1}: нет пригодных строк")
-
-		ratios = source[valid_rows, :] / vertical[valid_rows, None]
-
-		# Оцениваем фон каждого столбца без заданных «чистых» строк.
-		horizontal = np.quantile(ratios, 0.90, axis=0)
-
-		# В заведомо пустой области используем непосредственно результат factorize.
-		horizontal[-REFERENCE_WIDTH:] = reference_horizontal
-		horizontal = np.clip(np.rint(horizontal), 0, 255)
-
-		brightness = np.median(
-			source[valid_rows, -REFERENCE_WIDTH:]
-		)
-
-		product = vertical[:, None] * horizontal[None, :]
-		corrected = source.copy()
-		np.divide(
-			source * brightness,
-			product,
-			out=corrected,
-			where=product > 0,
-		)
+		corrected = original[:, x0:x0 + fragment_width].astype(np.float64)
+		for _ in range(1):
+			corrected = clear(corrected)
 		
-		corrected = correct_smooth_row_drift(
-			corrected,
-			neighbor_rows=2
-		)
-
-		black = source <= BLACK_LEVEL
-		black_rows = black.mean(axis=1) >= STRIPE_FRACTION
-		black_cols = black.mean(axis=0) >= STRIPE_FRACTION
-		corrected[black & (black_rows[:, None] | black_cols[None, :])] = brightness
-
 		result[:, x0:x0 + fragment_width] = np.clip(
 			np.rint(corrected), 0, 65535
 		).astype(np.uint16)
-
+	
 	return result
 
 def main():
